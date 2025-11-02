@@ -95,7 +95,7 @@ class DistributedEngine:
         if not hasattr(model, 'model_name') or not hasattr(model, 'input_shape'):
              raise ValueError("模型对象必须具有 'model_name' 和 'input_shape' 属性。")
         
-        self.master_models, worker_models, self.pooling_layers = \
+        self.master_models, self.worker_models, self.pooling_layers = \
             load_segment_models_dynamically(
                 model.model_name,
                 self.k,
@@ -106,7 +106,7 @@ class DistributedEngine:
         # ------------------------
 
         # 将 worker 需要的模型 (BlockWorkerDecoder) 发送给它们
-        send_tasks = [async_send_data(self.chosen_workers[i], (i, worker_models)) for i in range(self.n)]
+        send_tasks = [async_send_data(self.chosen_workers[i], (i, self.worker_models)) for i in range(self.n)]
         self.loop.run_until_complete(asyncio.gather(*send_tasks))  # send the layer_config to all workers
 
         recv_queue = SimpleQueue()  # wait for all responses from all workers
@@ -169,40 +169,142 @@ class DistributedEngine:
             # if self.fail_num > 0 and not self.forwarding_thread.is_alive():
             #     self.forwarding_thread.start() # 线程已在 init 中启动
 
+#     def end(self):
+#         self.is_working = False
+#         print("正在关闭 master 引擎...")
+#         # 发送结束信号
+#         # for worker_socket in self.worker_sockets:
+#         #     try:
+#         #         # 使用非阻塞发送可能失败，但我们正在关闭
+#         #         async_send_data(worker_socket, 'end')
+#         #     except Exception:
+#         #         pass # 忽略错误，因为我们正在关闭
+#         #     worker_socket.close()
+#         for worker_socket in self.worker_sockets:
+#             try:
+# #               # 使用非阻塞发送可能失败，但我们正在关闭
+# #               async_send_data(worker_socket, 'end')
+#                 # 提交到正在运行的 loop（如果 loop 已启动）
+#                 if hasattr(self, 'loop') and self.loop.is_running():
+#                     try:
+#                         asyncio.run_coroutine_threadsafe(async_send_data(worker_socket, 'end'), self.loop).result(timeout=1)
+#                     except Exception:
+#                         # 忽略发送失败
+#                         pass
+#                 else:
+#                     # 如果 loop 未运行，直接调用阻塞发送
+#                     send_data(worker_socket, 'end')
+#             except Exception:
+#                 pass # 忽略错误，因为我们正在关闭
+#             worker_socket.close()
+        
+#         # 等待线程结束
+#         # for t in self.recv_threads:
+#         #     t.join()
+#         # self.forwarding_thread.join()
+#         # self.asyncio_thread.join() # 这可能导致死锁
+#         print("Master 已关闭。")
+
+    # def end(self):
+    #     self.is_working = False # 设置全局停止标志
+    #     print("正在关闭 master 引擎...")
+        
+    #     # 1. 向所有 workers 发送退出信号 ('end')
+    #     for worker_socket in self.worker_sockets:
+    #         try:
+    #             if hasattr(self, 'loop') and self.loop.is_running():
+    #                 try:
+    #                     asyncio.run_coroutine_threadsafe(async_send_data(worker_socket, 'end'), self.loop).result(timeout=1)
+    #                 except Exception:
+    #                     pass
+    #             else:
+    #                 send_data(worker_socket, 'end')
+    #         except Exception:
+    #             pass
+        
+    #     # 2a. 等待所有接收线程退出
+    #     for t in self.recv_threads:
+    #         if t.is_alive():
+    #             # 强制中断阻塞I/O，这会导致 WinError 10038 打印出来。
+    #             # 但由于我们在 comm_util.py 中已经处理了 traceback，现在只需 close socket。
+    #             # 注意：如果您的 comm.py 在 recv_exact 中没有处理好超时/异常，这里就会卡住。
+    #             pass # 暂时不做 join，先关闭 socket
+        
+    #     # 3. 关闭所有 sockets
+    #     for worker_socket in self.worker_sockets:
+    #         try:
+    #             # 关闭 socket 会中断阻塞在 comm_util.py 接收线程上的 I/O
+    #             worker_socket.close() 
+    #         except Exception:
+    #             pass 
+                
+    #     # 4. 再次尝试 Join 所有的接收线程
+    #     # 此时线程应该已经抛出 WinError 10038 并根据 comm_util.py 中的逻辑退出循环了。
+    #     # 如果线程没有退出，那么就卡死在这里。
+    #     for t in self.recv_threads:
+    #         if t.is_alive():
+    #             t.join(timeout=5) # 给它5秒退出，避免永久卡死
+    #             if t.is_alive():
+    #                 print(f"警告：接收线程 {t.name} 未能在超时内退出，可能导致资源泄漏。")
+                    
+    #     if hasattr(self, 'forwarding_thread') and self.forwarding_thread.is_alive():
+    #          self.forwarding_thread.join(timeout=5)
+    #          if self.forwarding_thread.is_alive():
+    #              print(f"警告：转发线程未能在超时内退出。")
+                 
+    #     # 5. 最后，确保 Worker 进程退出
+    #     # Worker 进程是在 Master 启动时创建的，也需要 join。
+    #     if hasattr(self, 'worker_processes'):
+    #         for wp in self.worker_processes:
+    #             if wp.is_alive():
+    #                 wp.join(timeout=5)
+    #                 if wp.is_alive():
+    #                     print(f"严重错误：Worker 进程 {wp.pid} 未能在超时内退出。")
+
+
+    #     print("Master 已关闭。")
+
     def end(self):
-        self.is_working = False
+        """优化后的关闭流程"""
+        if not self.is_working:  # 防止重复调用
+            return
+            
+        self.is_working = False  # 设置停止标志
         print("正在关闭 master 引擎...")
-        # 发送结束信号
-        # for worker_socket in self.worker_sockets:
-        #     try:
-        #         # 使用非阻塞发送可能失败，但我们正在关闭
-        #         async_send_data(worker_socket, 'end')
-        #     except Exception:
-        #         pass # 忽略错误，因为我们正在关闭
-        #     worker_socket.close()
+        
+        # 1. 关闭事件循环
+        if hasattr(self, 'loop') and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+            
+        # 2. 先关闭所有 socket
         for worker_socket in self.worker_sockets:
             try:
-#               # 使用非阻塞发送可能失败，但我们正在关闭
-#               async_send_data(worker_socket, 'end')
-                # 提交到正在运行的 loop（如果 loop 已启动）
-                if hasattr(self, 'loop') and self.loop.is_running():
-                    try:
-                        asyncio.run_coroutine_threadsafe(async_send_data(worker_socket, 'end'), self.loop).result(timeout=1)
-                    except Exception:
-                        # 忽略发送失败
-                        pass
-                else:
-                    # 如果 loop 未运行，直接调用阻塞发送
-                    send_data(worker_socket, 'end')
+                worker_socket.shutdown(socket.SHUT_RDWR)  # 先尝试优雅关闭
+                worker_socket.close()
             except Exception:
-                pass # 忽略错误，因为我们正在关闭
-            worker_socket.close()
-        
-        # 等待线程结束
-        # for t in self.recv_threads:
-        #     t.join()
-        # self.forwarding_thread.join()
-        # self.asyncio_thread.join() # 这可能导致死锁
+                pass  # 忽略关闭错误
+                
+        # 3. 等待转发线程退出
+        if hasattr(self, 'forwarding_thread') and self.forwarding_thread.is_alive():
+            self.forwarding_thread.join(timeout=3)
+                
+        # 4. 等待接收线程退出
+        for t in self.recv_threads:
+            if t.is_alive():
+                t.join(timeout=3)  # 给每个线程3秒退出时间
+                
+        # 5. 清理其他资源
+        if hasattr(self, 'recv_queue'):
+            while not self.recv_queue.empty():
+                try:
+                    self.recv_queue.get_nowait()  # 清空队列
+                except queue.Empty:
+                    break
+                    
+        # 6. 确保 asyncio 线程退出
+        if hasattr(self, 'asyncio_thread') and self.asyncio_thread.is_alive():
+            self.asyncio_thread.join(timeout=3)
+            
         print("Master 已关闭。")
 
 
@@ -243,15 +345,30 @@ class DistributedEngine:
         k = self.k
         n = self.n
 
-        # 1. 将输入 x 沿通道维度分割为 k 份 (对应 SegmentEncoder 的设计)
-        try:
-            k_pieces = torch.chunk(x, k, dim=1)
+        # 1. 将输入 x 沿【空间维度】（高度维度 2）分割为 k 份
+        # 此时 input_H % k == 0 已在外层检查过，可以直接使用 torch.chunk
+        try:     
+            k_pieces = torch.chunk(x, k, dim=2) # <-- 空间分片 (沿高度 dim=2)
+            
         except RuntimeError as e:
+            # 如果到达这里，说明外部检查失败或出现意外
             print(f"\n[错误] 无法为 {block_name} 分割输入张量。")
-            print(f"输入张量通道: {x.shape[1]}, 目标 k: {k}")
-            print(f"SegmentEncoder 要求 k 必须能整除输入通道数。")
-            print(f"请在 main 中修改 k 的值 (例如 k=1)。")
+            print(f"输入张量高度: {x.shape[2]}, 目标 k: {k}")
+            print(f"错误: {e}")
             raise e
+
+        # # 1. 将输入 x 沿【空间维度】（高度维度 2）分割为 k 份
+        # try:     # 原本：k_pieces = torch.chunk(x, k, dim=1)  # <-- 通道分片 
+        #     if x.shape[2] % k != 0:
+        #         raise RuntimeError(f"空间维度 ({x.shape[2]}) 必须能被 k ({k}) 整除。")   
+        #     k_pieces = torch.chunk(x, k, dim=2) # <-- 空间分片 (沿高度 dim=2)
+            
+        # except RuntimeError as e:
+        #     # ... (保持原有的错误处理，但修改消息) ...
+        #     print(f"\n[错误] 无法为 {block_name} 分割输入张量。")
+        #     print(f"输入张量高度: {x.shape[2]}, 目标 k: {k}")
+        #     print(f"空间分片要求 k 必须能整除输入高度。")
+        #     raise e
 
         # 2. 使用编码器 E 生成 r 份奇偶校验张量
         parity_pieces = encoder(list(k_pieces))
@@ -299,12 +416,7 @@ class DistributedEngine:
         self.forwarding = False # 停止转发此任务
         return reconstructed_output, consumption
 
-    # --- 删除旧的分布式方法 ---
-    # def distributed_lt_conv(self, ...):
-    # def distributed_mds_conv(self, ...):
-    # def distributed_uncoded_conv(self, ...):
-    # def distributed_repetition_conv(self, ...):
-    # ... 这些函数被 execute_coded_segment 取代 ...
+
 
     def fail_forwarding(self):
         while self.is_working:
@@ -366,16 +478,97 @@ def execute_layer(input, layer):
     return output, consumption
 
 
+# def dnn_inference_segmented(x: torch.Tensor, model, distributed_engine: DistributedEngine, conv_repeat=1):
+#     """
+#     新的推理循环，按分段模型执行。
+#     取代旧的 dnn_inference_by_layer。
+#     """
+#     print("开始分段式推理...")
+    
+#     # 从引擎获取分段模型和池化层
+#     master_models = distributed_engine.master_models
+#     pooling_layers = distributed_engine.pooling_layers
+    
+#     # 确保按 'block_1', 'block_2' ... 的顺序执行
+#     block_names = sorted(master_models.keys()) 
+    
+#     segment_latencies = {block_name: [] for block_name in block_names}
+#     local_op_latencies = []
+#     total_run_latencies = []
+    
+#     final_output = None
+
+#     for r in tqdm(range(conv_repeat)):
+#         current_input = x
+#         total_latency_run = 0
+        
+#         # 1. 遍历所有编码卷积块 (F_Conv)
+#         for i, block_name in enumerate(block_names):
+#             encoder, final_decoder = master_models[block_name]
+            
+#             # 执行编码分段计算 (E -> F_conv -> D)
+#             segment_output, segment_latency = distributed_engine.execute_coded_segment(
+#                 current_input, 
+#                 block_name, 
+#                 encoder, 
+#                 final_decoder
+#             )
+            
+#             segment_latencies[block_name].append(segment_latency)
+#             total_latency_run += segment_latency
+#             current_input = segment_output # 更新当前输入为解码后的输出
+            
+#             # 2. 在 Master 本地执行池化层 (Pooling)
+#             if i < len(pooling_layers):
+#                 pooling_layer = pooling_layers[i]
+#                 pool_output, pool_latency = execute_layer(current_input, pooling_layer)
+                
+#                 if r == 0: local_op_latencies.append(pool_latency) # 只记录一次
+#                 total_latency_run += pool_latency
+#                 current_input = pool_output # 更新输入
+
+#         # 3. 在 Master 本地执行分类器 (F_Fc)
+#         fc_start = time.perf_counter()
+#         if hasattr(model, 'avgpool'): # 适配 VGG / AlexNet
+#             current_input = model.avgpool(current_input)
+#         current_input = torch.flatten(current_input, 1)
+#         if hasattr(model, 'classifier'):
+#             final_output = model.classifier(current_input)
+        
+#         fc_latency = time.perf_counter() - fc_start
+#         if r == 0: local_op_latencies.append(fc_latency)
+#         total_latency_run += fc_latency
+        
+#         total_run_latencies.append(total_latency_run)
+
+#     print("--- 分段式推理完成 ---")
+#     print(f"总运行 {conv_repeat} 次，平均端到端时延: {np.mean(total_run_latencies):.6f}s")
+    
+#     # 返回最终输出和时延字典
+#     return final_output, segment_latencies, local_op_latencies, total_run_latencies
+
+# 辅助函数: 在 Master 本地执行卷积块
+def execute_conv_block_locally(input, worker_decoder: nn.Module):
+    """
+    本地执行 (Master端)，用于不可分块的卷积块。
+    """
+    start = time.perf_counter()
+    output = worker_decoder(input)
+    consumption = time.perf_counter() - start
+    return output, consumption
+
+
 def dnn_inference_segmented(x: torch.Tensor, model, distributed_engine: DistributedEngine, conv_repeat=1):
     """
-    新的推理循环，按分段模型执行。
-    取代旧的 dnn_inference_by_layer。
+    新的推理循环，按分段模型执行，支持分布式/本地混合计算。
     """
     print("开始分段式推理...")
     
-    # 从引擎获取分段模型和池化层
+    # 从引擎获取分段模型、Worker 配置和池化层
     master_models = distributed_engine.master_models
+    worker_models = distributed_engine.worker_models # WorkerDecoder 实例
     pooling_layers = distributed_engine.pooling_layers
+    k_workers = distributed_engine.k
     
     # 确保按 'block_1', 'block_2' ... 的顺序执行
     block_names = sorted(master_models.keys()) 
@@ -393,25 +586,40 @@ def dnn_inference_segmented(x: torch.Tensor, model, distributed_engine: Distribu
         # 1. 遍历所有编码卷积块 (F_Conv)
         for i, block_name in enumerate(block_names):
             encoder, final_decoder = master_models[block_name]
+            worker_decoder = worker_models[block_name]
             
-            # 执行编码分段计算 (E -> F_conv -> D)
-            segment_output, segment_latency = distributed_engine.execute_coded_segment(
-                current_input, 
-                block_name, 
-                encoder, 
-                final_decoder
-            )
+            input_H = current_input.shape[2]
+            
+            # --- 混合计算逻辑 ---
+            if input_H % k_workers != 0:
+                # 情况 1: 不可整除，在 Master 端本地执行 F_conv
+                print(f"[LOCAL] {block_name}: 高度 {input_H} 无法被 k={k_workers} 整除。本地执行 F_Conv。")
+                
+                segment_output, segment_latency = execute_conv_block_locally(
+                    current_input, 
+                    worker_decoder
+                )
+            else:
+                # 情况 2: 可整除，执行分布式编码计算
+                # 重新启用您的原始代码逻辑 (确保 execute_coded_segment 逻辑是正确的)
+                segment_output, segment_latency = distributed_engine.execute_coded_segment(
+                    current_input, 
+                    block_name, 
+                    encoder, 
+                    final_decoder
+                )
+            # ---------------------
             
             segment_latencies[block_name].append(segment_latency)
             total_latency_run += segment_latency
-            current_input = segment_output # 更新当前输入为解码后的输出
+            current_input = segment_output # 更新当前输入为解码或本地执行后的输出
             
             # 2. 在 Master 本地执行池化层 (Pooling)
             if i < len(pooling_layers):
                 pooling_layer = pooling_layers[i]
                 pool_output, pool_latency = execute_layer(current_input, pooling_layer)
                 
-                if r == 0: local_op_latencies.append(pool_latency) # 只记录一次
+                if r == 0: local_op_latencies.append(pool_latency)
                 total_latency_run += pool_latency
                 current_input = pool_output # 更新输入
 
@@ -433,7 +641,7 @@ def dnn_inference_segmented(x: torch.Tensor, model, distributed_engine: Distribu
     print(f"总运行 {conv_repeat} 次，平均端到端时延: {np.mean(total_run_latencies):.6f}s")
     
     # 返回最终输出和时延字典
-    return final_output, segment_latencies, local_op_latencies
+    return final_output, segment_latencies, local_op_latencies, total_run_latencies
 
 
 def distributed_inference_testing(layer_repetition, methods: list, master: DistributedEngine, save=False):
@@ -441,7 +649,7 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
         f'test_methods={methods}, repetition={layer_repetition}, n={master.n}, k={master.k}, r={master.r}, fail_num={master.fail_num}')
     
     # 'methods' 参数在
-    output, segment_latencies, local_latencies = dnn_inference_segmented(x, model,
+    output, segment_latencies, local_latencies, total_run_latencies = dnn_inference_segmented(x, model,
                                                                          distributed_engine=master,
                                                                          conv_repeat=layer_repetition)
 
@@ -458,8 +666,9 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
     print(f"  [Local Ops] (Pooling/FC) \t: {np.sum(local_latencies):.6f}s")
     print("-------------------------")
     print(f"  Total (Segments + Local) \t: {total_segment_latency + np.sum(local_latencies):.6f}s")
-    print(f"  (参考) 端到端平均时延 \t: {np.mean(master.load_object('total_run_latencies.tmp')): .6f}s") # 假设 dnn_inference_segmented 保存了这个
-    
+    # print(f"  (参考) 端到端平均时延 \t: {np.mean(master.load_object('total_run_latencies.tmp')): .6f}s") # 假设 dnn_inference_segmented 保存了这个
+    print(f"  (参考) 端到端平均时延 \t: {np.mean(total_run_latencies): .6f}s")
+
     # 旧的 'latency_analysis' 和 'latency_min_mean' 不再适用，因为它们是基于逐层和多方法的
     
     if save:
@@ -467,11 +676,12 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
         print("保存功能未针对分段逻辑更新。")
 
     master.end()
+    print("测试完成，Master 已关闭。")
 
 
 # --- Main ---
 if __name__ == '__main__':
-    # master_ip = '192.168.1.106'
+    # master_ip = '192.168.1.168'
     master_ip = '127.0.0.1'
     worker_socket_timeout = None
     model_name = 'vgg16'
@@ -492,11 +702,11 @@ if __name__ == '__main__':
         # 如果 k=1, 那么 "k_pieces" 就是 1 个完整的张量。
         # (k=1, r=1) 表示系统总共 2 个 worker，可以容忍 1 个失败。
         k = 1  # 数据分片数 (k=1 兼容 VGG16 的 3 通道输入)
-        r = 1  # 奇偶校验分片数
+        r = 0  # 奇偶校验分片数
         # ----------------
         
         n_total = k + r
-        test_repetition = 4
+        test_repetition = 2
         fail_num = 0      # 模拟故障数
         assert fail_num <= r, f"故障数(fail_num={fail_num}) 必须小于等于冗余数(r={r})"
 
@@ -515,6 +725,7 @@ if __name__ == '__main__':
             print("\n--- 发生未捕获的异常 ---")
             traceback.print_exc()
             master.end() # 确保在异常时关闭
+
     else:
         # 本地推理 (旧逻辑)
         # output, layer_latency = dnn_inference_by_layer(x, model.features, model.next)

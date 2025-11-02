@@ -1,8 +1,9 @@
 # util.py
 
 import torch
-from torchvision import models
 import socket
+from models.VGG16 import vgg16
+from models.AlexNet import AlexNet
 
 def load_model(model_name):
     """
@@ -17,19 +18,35 @@ def load_model(model_name):
 
     if model_name.lower() == 'vgg16':
         # return models.vgg16(weights=models.VGG16_Weights.DEFAULT)
-        return models.vgg16(weights=None) 
+        return vgg16()
     elif model_name.lower() == 'alexnet':
         # return models.alexnet(weights=models.AlexNet_Weights.DEFAULT)
-        return models.alexnet(weights=None)
+        return AlexNet()
     else:
         raise ValueError(f"模型 {model_name} 在模拟 util.py 中不受支持")
 
+# def get_ip_addr(subnet=None):
+#     """
+#     master.py 调用的函数以获取主节点的 IP 地址。
+#     """
+#     hostname = socket.gethostname()
+#     local_ip = socket.gethostbyname(hostname)
+
+#     if subnet:
+#         # 仅返回与指定子网匹配的 IP 地址
+#         if local_ip.startswith(subnet):
+#             return local_ip
+#         else:
+#             raise ValueError(f"本地 IP 地址 {local_ip} 不在子网 {subnet} 中。")
+    
+#     return local_ip
+
 def get_ip_addr(subnet=None):
     """
-    worker.py 调用此函数。
-    对于单机测试，我们强制它返回 '127.0.0.1'。
+    master.py 调用的函数以获取主节点的 IP 地址。
     """
-    return '127.0.0.1'
+
+    return "127.0.0.1"
 
 def save_object(obj, filename):
     """

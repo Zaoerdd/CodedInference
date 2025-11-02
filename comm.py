@@ -151,10 +151,10 @@ def send_all(sock: socket.socket, data: bytes, timeout: float = 10) -> None:
             total_sent += sent
     except socket.timeout:
         raise TimeoutError(f"发送数据超时 (已发送 {total_sent}/{size} 字节)")
-    finally:
-        sock.settimeout(None)  # 恢复默认超时设置
+    # finally:
+    #     sock.settimeout(None)  # 恢复默认超时设置
 
-def recv_exact(sock: socket.socket, size: int, timeout: float = 10) -> bytes:
+def recv_exact(sock: socket.socket, size: int, timeout: float = 20) -> bytes:
     """
     可靠的阻塞接收指定字节数的数据。
     """
@@ -171,8 +171,8 @@ def recv_exact(sock: socket.socket, size: int, timeout: float = 10) -> bytes:
             total_recv += nbytes
     except socket.timeout:
         raise TimeoutError(f"接收数据超时 (已接收 {total_recv}/{size} 字节)")
-    finally:
-        sock.settimeout(None)  # 恢复默认超时设置
+    # finally:
+    #     sock.settimeout(None)  # 恢复默认超时设置
     
     return bytes(data)
 

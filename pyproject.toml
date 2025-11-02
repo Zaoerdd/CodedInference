@@ -15,7 +15,6 @@ platforms = ["win-64"]
 [tool.pixi.pypi-dependencies]
 codedinference = { path = ".", editable = true }
 torch = { index = "https://download.pytorch.org/whl/cpu" }
-torchvision = { index = "https://download.pytorch.org/whl/cpu" }
 
 
 [tool.pixi.tasks]
@@ -23,3 +22,4 @@ torchvision = { index = "https://download.pytorch.org/whl/cpu" }
 [tool.pixi.dependencies]
 numpy = ">=1.24.4,<2"
 tqdm = ">=4.67.1,<5"
+ipykernel = ">=6.29.5,<7"

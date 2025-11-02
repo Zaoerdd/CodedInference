@@ -13,7 +13,9 @@ from queue import SimpleQueue
 from comm import send_data, recv_data
 # from models.googlenet import BasicConv2d # 不再需要
 # import torch.nn.functional as F # 不再需要
-from util import get_ip_addr, load_model
+from util import get_ip_addr
+import socket
+
 
 __subnet__ = '192.168.1'
 __port__ = 59999
@@ -46,20 +48,20 @@ class Worker:
         
         self.task_queue = None
         self.send_queue = None
-        self.ip = get_ip_addr(__subnet__)
+        # self.ip = get_ip_addr(__subnet__)
         self.time_records = []
         self.initialized = True
         self.sleep = False
         self.fail = True # 保持这个标志，用于模拟故障
 
-        if self.ip is None:
-            print('Fail to acquire ip, try again...')
-            self.ip = get_ip_addr(__subnet__)
-            if self.ip is None:
-                print('Fail to acquire ip, exit')
-                self.initialized = False
-                return
-
+        # if self.ip is None:
+        #     print('Fail to acquire ip, try again...')
+        #     self.ip = get_ip_addr(__subnet__)
+        #     if self.ip is None:
+        #         print('Fail to acquire ip, exit')
+        #         self.initialized = False
+        #         return
+        self.ip = get_ip_addr(__subnet__)
         print(f'ip_addr: {self.ip}')
 
     def start_inference(self):
@@ -112,6 +114,17 @@ class Worker:
             print(f'Start Serving with Possible Failure')
             while True:
                 task_data = self.task_queue.get()
+                print('Get task from queue')
+                print(f'Task data type: {type(task_data)}')
+
+                if task_data == 0:
+                    print('Received termination signal (0). Exiting inference loop.')
+                    break
+
+                if not isinstance(task_data, tuple):
+                    print(f'Invalid task data format: {task_data}')
+                    raise ValueError('Invalid task data format received by worker.')
+
                 if len(task_data) == 4:
                     # 任务格式: (taskID, task_idx, block_name, x)
                     taskID, task_idx, block_name, x = task_data
@@ -178,7 +191,9 @@ class Worker:
                 if data == 0:
                     print("Send 线程退出。")
                     break
-                    
+                if data == 'end':  # 收到master的消息
+                    print('Recv "end" from master in send thread')
+                    break
                 send_data(send_socket, data)
                 # print('Send successfully')
             except Exception:

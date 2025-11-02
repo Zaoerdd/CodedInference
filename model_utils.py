@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+from models.googlenet import BasicConv2d
+
 def auto_segment_model(model, input_shape):
     """
     根据池化层自动分割一个CNN模型。
@@ -26,42 +28,61 @@ def auto_segment_model(model, input_shape):
     in_channels = input_shape[1]
     dummy_input = torch.randn(input_shape)
     
+    # ** 新增：辅助函数安全获取通道信息 **
+    def get_channel_info(layer):
+        if isinstance(layer, nn.Conv2d):
+            return layer.in_channels, layer.out_channels
+        elif isinstance(layer, BasicConv2d):
+            # 通过访问 BasicConv2d 内部的 nn.Conv2d 模块来获取通道信息
+            return layer.conv.in_channels, layer.conv.out_channels
+        return None, None
+    
     segment_count = 1
 
     # 遍历模型的所有特征层
+# 遍历模型的所有特征层
     for layer in model.features:
-        if isinstance(layer, nn.Conv2d):
-            # 如果是卷积层，则将其添加到当前段
+        # ** 1. 允许 BasicConv2d 作为卷积层 **
+        if isinstance(layer, (nn.Conv2d, BasicConv2d)): 
+            if not current_segment_layers:
+                # 打印 Block 的起始输入尺寸
+                print(f"DEBUG: Block {segment_count} Input Shape: {list(dummy_input.shape)}")
+                
             current_segment_layers.append(layer)
         
         elif isinstance(layer, (nn.MaxPool2d, nn.AdaptiveAvgPool2d)):
-            # 池化层标志着一个段的结束
             if current_segment_layers:
                 block_name = f'block_{segment_count}'
                 
-                # 获取当前段的详细配置
-                out_channels = current_segment_layers[-1].out_channels
-                layer_configs = [(l.in_channels, l.out_channels) for l in current_segment_layers]
+                # ** 2. 使用辅助函数获取 out_channels **
+                _, out_channels = get_channel_info(current_segment_layers[-1])
+                layer_configs = [get_channel_info(l) for l in current_segment_layers]
                 
                 block_configs[block_name] = {
                     'layers': layer_configs,
                     'in_c': in_channels,
                     'out_c': out_channels,
-                    'width': dummy_input.shape[-1] # 当前段的输入宽度
+                    'width': dummy_input.shape[-1]
                 }
                 
-                # 通过“干运行”来计算当前段的输出，作为下一个段的输入
+                # 通过“干运行”来计算当前段的输出
                 temp_model = nn.Sequential(*current_segment_layers)
                 dummy_input = temp_model(dummy_input)
+                
+                # 打印 Block 的卷积输出尺寸
+                print(f"DEBUG: {block_name} Conv Output Shape: {list(dummy_input.shape)}")
 
-                # 存储池化层，Master节点需要在段之间执行它
+                # 存储池化层
                 pooling_layers.append(layer)
                 
                 # 让虚拟输入通过池化层，以获得下一个段的正确输入形状
                 dummy_input = layer(dummy_input)
+                
+                # 打印 Block 的池化输出尺寸 (下一个 Block 的输入)
+                print(f"DEBUG: {block_name} Pool Output Shape: {list(dummy_input.shape)}")
+                
                 in_channels = out_channels
                 
-                # 为下一个段重置
                 current_segment_layers = []
                 segment_count += 1
         
@@ -75,8 +96,10 @@ def auto_segment_model(model, input_shape):
     # 处理最后一组卷积层 (在最后一个池化层之后)
     if current_segment_layers:
         block_name = f'block_{segment_count}'
-        out_channels = current_segment_layers[-1].out_channels
-        layer_configs = [(l.in_channels, l.out_channels) for l in current_segment_layers]
+        
+        # 再次使用辅助函数获取信息
+        _, out_channels = get_channel_info(current_segment_layers[-1])
+        layer_configs = [get_channel_info(l) for l in current_segment_layers]
         
         block_configs[block_name] = {
             'layers': layer_configs,
