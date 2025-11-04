@@ -1,6 +1,8 @@
 # master.py
 
 import sys
+import os
+import json
 from datetime import datetime
 import numpy as np
 from comm_util import *
@@ -522,28 +524,11 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
     print(
         f'test_methods={methods}, repetition={layer_repetition}, n={master.n}, k={master.k}, r={master.r}, fail_num={master.fail_num}')
     
-    # 'methods' 参数在
-    # output, segment_latencies, local_latencies, total_run_latencies = dnn_inference_segmented(x, model,
-                                                                        #  distributed_engine=master,
-                                                                        #  conv_repeat=layer_repetition)
     output, detail_segment_latencies, local_latencies, total_run_latencies = dnn_inference_segmented(x, model,
                                                                          distributed_engine=master,
                                                                          conv_repeat=layer_repetition)
     print(f'最终输出 Shape: {output.shape}')
 
-    # # latency summary
-    # print("\n--- 时延总结 (平均值) ---")
-    # total_segment_latency = 0
-    # for block_name, lats in segment_latencies.items():
-    #     mean_lat = np.mean(lats)
-    #     total_segment_latency += mean_lat
-    #     print(f"  [Segment] {block_name} \t: {mean_lat:.6f}s")
-    
-    # print(f"  [Local Ops] (Pooling/FC) \t: {np.sum(local_latencies):.6f}s")
-    # print("-------------------------")
-    # print(f"  Total (Segments + Local) \t: {total_segment_latency + np.sum(local_latencies):.6f}s")
-    # # print(f"  (参考) 端到端平均时延 \t: {np.mean(master.load_object('total_run_latencies.tmp')): .6f}s") # 假设 dnn_inference_segmented 保存了这个
-    # print(f"  (参考) 端到端平均时延 \t: {np.mean(total_run_latencies): .6f}s")
     # latency summary
     print("\n--- 详细时延总结 (平均值) ---")
     total_segment_latency_sum = 0
@@ -566,11 +551,43 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
     print("-------------------------")
     print(f"  **总平均端到端时延** \t: {np.mean(total_run_latencies): .6f}s")
 
-    # 旧的 'latency_analysis' 和 'latency_min_mean' 不再适用，因为它们是基于逐层和多方法的
-    
+
+    # --- 保存逻辑更新 ---
     if save:
-        # ... 保存逻辑需要更新 ...
-        print("保存功能未针对分段逻辑更新。")
+        # 定义结果保存目录
+        save_dir = 'test_results' 
+        # 检查并创建目录
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+            print(f"已创建结果目录: {save_dir}")
+
+        filename_prefix = f'result_n{master.n}_k{master.k}_r{master.r}_f{master.fail_num}_rep{layer_repetition}'
+        
+        # 1. 准备详细分段时延数据 (detail_segment_latencies)
+        json_segment_data = {}
+        for block_name, block_lats in detail_segment_latencies.items():
+            # 将 NumPy 数组或列表转换为标准的 Python 列表
+            json_segment_data[block_name] = {
+                key: np.array(val).tolist() for key, val in block_lats.items()
+            }
+        
+        # 保存详细分段时延
+        json_filename_details = os.path.join(save_dir, f'{filename_prefix}_segment_details.json')
+        with open(json_filename_details, 'w') as f:
+            json.dump(json_segment_data, f, indent=4)
+        print(f"详细分段时延已保存到 {json_filename_details}")
+        
+        # 2. 保存本地操作时延 (local_latencies)
+        json_filename_local = os.path.join(save_dir, f'{filename_prefix}_local_ops.json')
+        with open(json_filename_local, 'w') as f:
+            json.dump(np.array(local_latencies).tolist(), f, indent=4)
+        print(f"本地操作时延已保存到 {json_filename_local}")
+
+        # 3. 保存总运行时间 (total_run_latencies)
+        json_filename_total = os.path.join(save_dir, f'{filename_prefix}_total_run.json')
+        with open(json_filename_total, 'w') as f:
+            json.dump(np.array(total_run_latencies).tolist(), f, indent=4)
+        print(f"总运行时间已保存到 {json_filename_total}")
 
     master.end()
     print("测试完成，Master 已关闭。")
@@ -578,8 +595,8 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
 
 # --- Main ---
 if __name__ == '__main__':
-    # master_ip = '192.168.1.168'
-    master_ip = '127.0.0.1'
+    master_ip = '192.168.1.168'
+    # master_ip = '127.0.0.1'
     worker_socket_timeout = None
     model_name = 'vgg16'
     
@@ -596,12 +613,12 @@ if __name__ == '__main__':
         # --- 编码参数 ---
         # 如果 k=1, 那么 "k_pieces" 就是 1 个完整的张量。
         # (k=1, r=1) 表示系统总共 2 个 worker，可以容忍 1 个失败。
-        k = 1  # 数据分片数
-        r = 0  # 奇偶校验分片数
+        k = 2  # 数据分片数
+        r = 1  # 奇偶校验分片数
         # ----------------
         
         n_total = k + r
-        test_repetition = 2
+        test_repetition = 1
         fail_num = 0      # 模拟故障数
         assert fail_num <= r, f"故障数(fail_num={fail_num}) 必须小于等于冗余数(r={r})"
 
@@ -612,7 +629,7 @@ if __name__ == '__main__':
         master.set_failure(fail_num)
 
         test_methods = ['segment_coded'] # 仅用于日志记录
-        save = False
+        save = True
         
         try:
             distributed_inference_testing(test_repetition, test_methods, master, save)
