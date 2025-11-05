@@ -161,10 +161,8 @@ def load_segment_models_dynamically(model_name, k_workers, r_workers, input_shap
 
     # 1. 根据名称加载预训练模型
     if model_name.lower() == 'vgg16':
-        # model = models.vgg16(weights=models.VGG16_Weights.DEFAULT)
         model = vgg16()
     # elif model_name.lower() == 'alexnet':
-    #     # model = models.alexnet(weights=models.AlexNet_Weights.DEFAULT)
     #     model = models.alexnet()
     else:
         raise ValueError(f"模型 '{model_name}' 尚不支持自动分割。")

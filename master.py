@@ -7,19 +7,16 @@ from datetime import datetime
 import numpy as np
 from comm_util import *
 import asyncio
-# from coding_util import *
 from functions import *
 from tqdm import tqdm
 from util import save_object, load_object
 import numpy.random as random
 from comm import *
 from socket import create_server, AF_INET
-# from coded_distributed_inference.fountain_code_test.LTCodes import * # LT代码被新逻辑取代
 
 # 导入新的分段模型工具
 from model_segments import load_segment_models_dynamically
 
-# Added imports required by this module
 import time
 import threading
 import traceback
@@ -160,8 +157,6 @@ class DistributedEngine:
         finally:
             self.loop.close()
 
-    # set_random_waiting, set_n, set_straggler 不再与新逻辑兼容，可以删除或禁用
-    # set_n 和 set_straggler 的逻辑已经被 k_workers 和 r_workers 的初始化取代
 
     def set_failure(self, n_failure_new: int):
         if n_failure_new is not None and n_failure_new != self.fail_num:
@@ -257,6 +252,27 @@ class DistributedEngine:
 
         ## 分块和编码
         start_E = time.perf_counter()
+
+        # --- [START] 修改点 1: 零填充逻辑 ---
+        original_H = x.shape[2]
+        pad_H = 0
+        if original_H % k != 0:
+            # 计算需要填充的高度
+            required_H = ((original_H // k) + 1) * k
+            pad_H = required_H - original_H
+            
+            print(f"[PAD] {block_name}: 高度 {original_H} 无法被 k={k} 整除。填充 {pad_H} 像素。")
+
+            # 在高度维度 (dim=2) 进行填充: (pad_left, pad_right, pad_top, pad_bottom)
+            # 我们只需要填充底部 (pad_bottom)。
+            # 注意：PyTorch F.pad 从最后一个维度开始，这里是 (W_left, W_right, H_top, H_bottom)
+            # W 维度不变 (0, 0)，H 维度只填充底部 (0, pad_H)
+            x_padded = F.pad(x, (0, 0, 0, pad_H), mode='constant', value=0.0)
+            x = x_padded # 使用填充后的张量进行分片
+            
+        # 1. 将输入 x 沿【空间维度】（高度维度 2）分割为 k 份
+        # 现在 x.shape[2] % k == 0 应该成立
+        
         # 1. 将输入 x 沿【空间维度】（高度维度 2）分割为 k 份
         # 此时 input_H % k == 0 已在外层检查过，可以直接使用 torch.chunk
         try:     
@@ -309,7 +325,7 @@ class DistributedEngine:
             # else:
             #     print(f"收到过期任务 {taskID}，丢弃")
 
-        detail_latencies['Recv_Wait_k'] = time.perf_counter() - start_recv_wait # <--- 记录 Recv Wait 时延
+        detail_latencies['Recv_Wait_k'] = time.perf_counter() - start_recv_wait # 记录 Recv Wait 时延
 
         # consumption = time.perf_counter() - start_or_taskID
         
@@ -336,8 +352,14 @@ class DistributedEngine:
         detail_latencies['Total_Segment'] = total_segment_latency
 
         self.forwarding = False # 停止转发此任务
+
+        # --- [START] 修改点 2: 移除填充逻辑 ---
+        if pad_H > 0:
+            # 移除填充的部分，恢复原始高度
+            reconstructed_output = reconstructed_output[:, :, :original_H, :]
+        # --- [END] 修改点 2: 移除填充逻辑 ---
         
-        return reconstructed_output, detail_latencies # <--- 返回详细时延字典
+        return reconstructed_output, detail_latencies # 返回详细时延字典
 
         # return reconstructed_output, consumption
 
@@ -442,44 +464,61 @@ def dnn_inference_segmented(x: torch.Tensor, model, distributed_engine: Distribu
         current_input = x
         total_latency_run = 0
         
-        # 1. 遍历所有编码卷积块 (F_Conv)
+        # # 1. 遍历所有编码卷积块 (F_Conv)
+        # for i, block_name in enumerate(block_names):
+        #     encoder, final_decoder = master_models[block_name]
+        #     worker_decoder = worker_models[block_name]
+            
+        #     input_H = current_input.shape[2]
+            
+        #     # --- 混合计算逻辑 ---
+        #     if input_H % k_workers != 0:
+        #         # 情况 1: 不可整除，在 Master 端本地执行 F_conv
+        #         print(f"[LOCAL] {block_name}: 高度 {input_H} 无法被 k={k_workers} 整除。本地执行 F_Conv。")
+                
+        #         segment_output, segment_latency = execute_conv_block_locally(
+        #             current_input, 
+        #             worker_decoder
+        #         )
+        #         # 本地执行，所有详细时延都为 0，Total_Segment 为本地时延
+        #         detail_lats = {
+        #             'E_encode': 0.0, 'Send_Tasks': 0.0, 'Recv_Wait_k': 0.0, 
+        #             'D_decode': 0.0, 'Total_Segment': segment_latency
+        #         }
+        #     else:
+        #         # 情况 2: 可整除，执行分布式编码计算
+        #         # 重新启用原始代码逻辑 (确保 execute_coded_segment 逻辑是正确的)
+        #         # segment_output, segment_latency = distributed_engine.execute_coded_segment(
+        #         #     current_input, 
+        #         #     block_name, 
+        #         #     encoder, 
+        #         #     final_decoder
+        #         # )
+        #         segment_output, detail_lats = distributed_engine.execute_coded_segment( # <--- 接收详细时延字典
+        #             current_input, 
+        #             block_name, 
+        #             encoder, 
+        #             final_decoder
+        #         )
+        #         segment_latency = detail_lats['Total_Segment'] # <--- 提取总时延
+            # ---------------------
+
+            # 1. 遍历所有编码卷积块 (F_Conv)
         for i, block_name in enumerate(block_names):
             encoder, final_decoder = master_models[block_name]
-            worker_decoder = worker_models[block_name]
+            # worker_decoder = worker_models[block_name] # 不再需要，因为不再本地执行
             
-            input_H = current_input.shape[2]
-            
-            # --- 混合计算逻辑 ---
-            if input_H % k_workers != 0:
-                # 情况 1: 不可整除，在 Master 端本地执行 F_conv
-                print(f"[LOCAL] {block_name}: 高度 {input_H} 无法被 k={k_workers} 整除。本地执行 F_Conv。")
-                
-                segment_output, segment_latency = execute_conv_block_locally(
-                    current_input, 
-                    worker_decoder
-                )
-                # 本地执行，所有详细时延都为 0，Total_Segment 为本地时延
-                detail_lats = {
-                    'E_encode': 0.0, 'Send_Tasks': 0.0, 'Recv_Wait_k': 0.0, 
-                    'D_decode': 0.0, 'Total_Segment': segment_latency
-                }
-            else:
-                # 情况 2: 可整除，执行分布式编码计算
-                # 重新启用原始代码逻辑 (确保 execute_coded_segment 逻辑是正确的)
-                # segment_output, segment_latency = distributed_engine.execute_coded_segment(
-                #     current_input, 
-                #     block_name, 
-                #     encoder, 
-                #     final_decoder
-                # )
-                segment_output, detail_lats = distributed_engine.execute_coded_segment( # <--- 接收详细时延字典
-                    current_input, 
-                    block_name, 
-                    encoder, 
-                    final_decoder
-                )
-                segment_latency = detail_lats['Total_Segment'] # <--- 提取总时延
-            # ---------------------
+            # input_H = current_input.shape[2] # 不再需要
+
+            # --- 混合计算逻辑被简化 ---
+            # 直接执行分布式编码计算，填充逻辑已移入 execute_coded_segment
+            segment_output, detail_lats = distributed_engine.execute_coded_segment( 
+                current_input, 
+                block_name, 
+                encoder, 
+                final_decoder
+            )
+            segment_latency = detail_lats['Total_Segment'] # <--- 提取总时延
             
             # segment_latencies[block_name].append(segment_latency)
             # 记录详细时延
@@ -595,8 +634,8 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
 
 # --- Main ---
 if __name__ == '__main__':
-    master_ip = '192.168.1.168'
-    # master_ip = '127.0.0.1'
+    # master_ip = '192.168.1.168'
+    master_ip = '127.0.0.1'
     worker_socket_timeout = None
     model_name = 'vgg16'
     
@@ -613,7 +652,7 @@ if __name__ == '__main__':
         # --- 编码参数 ---
         # 如果 k=1, 那么 "k_pieces" 就是 1 个完整的张量。
         # (k=1, r=1) 表示系统总共 2 个 worker，可以容忍 1 个失败。
-        k = 2  # 数据分片数
+        k = 3  # 数据分片数
         r = 1  # 奇偶校验分片数
         # ----------------
         
