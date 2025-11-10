@@ -1,4 +1,5 @@
 # master.py
+# python .\worker.py --master 127.0.0.1 --model vgg16
 
 import sys
 import os
@@ -341,7 +342,7 @@ class DistributedEngine:
         # 7. 清理队列中多余的 (n-k) 个结果 (防止阻塞后续任务)
         clean_start = time.perf_counter()
         while recv_cnt < n - self.fail_num:
-            _ = self.recv_queue.get(timeout=10)
+            _ = self.recv_queue.get(timeout=20)
             recv_cnt += 1
             
         clean_latency = time.perf_counter() - clean_start
@@ -634,8 +635,8 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
 
 # --- Main ---
 if __name__ == '__main__':
-    # master_ip = '192.168.1.168'
-    master_ip = '127.0.0.1'
+    master_ip = '192.168.1.168'
+    # master_ip = '127.0.0.1'
     worker_socket_timeout = None
     model_name = 'vgg16'
     
@@ -652,13 +653,13 @@ if __name__ == '__main__':
         # --- 编码参数 ---
         # 如果 k=1, 那么 "k_pieces" 就是 1 个完整的张量。
         # (k=1, r=1) 表示系统总共 2 个 worker，可以容忍 1 个失败。
-        k = 3  # 数据分片数
-        r = 1  # 奇偶校验分片数
+        k = 4  # 数据分片数
+        r = 2  # 奇偶校验分片数
         # ----------------
         
         n_total = k + r
-        test_repetition = 1
-        fail_num = 0      # 模拟故障数
+        test_repetition = 10
+        fail_num = 1      # 模拟故障数
         assert fail_num <= r, f"故障数(fail_num={fail_num}) 必须小于等于冗余数(r={r})"
 
         print(f"\n--- 分布式推理测试 (n={n_total}, k={k}, r={r}, fail_num={fail_num}) ---\n")
