@@ -1,5 +1,6 @@
 # master.py
-# python .\worker.py --master 127.0.0.1 --model vgg16
+# python worker.py --master 127.0.0.1 --model vgg16
+# python worker.py --master 192.168.1.13 --model vgg16
 
 import sys
 import os
@@ -133,7 +134,7 @@ class DistributedEngine:
             range(self.n)]
         
         self.not_fail_list = list(range(self.n))
-        self.forwarding_thread = threading.Thread(target=self.bad_fail_forwarding, args=[]) # 保持故障转发线程
+        # self.forwarding_thread = threading.Thread(target=self.bad_fail_forwarding, args=[]) # 保持故障转发线程
         self.cur_layer_id = None # 将用于存储 block_name
         self.inputs = None # 将用于存储 k+r 个分片
 
@@ -144,7 +145,7 @@ class DistributedEngine:
         #     conn.setblocking(False)
 
         # 启动所有线程
-        self.forwarding_thread.start()
+        # self.forwarding_thread.start()
         for t in self.recv_threads:
             t.start()
         
@@ -166,6 +167,7 @@ class DistributedEngine:
             print(f"设置模拟故障数: {self.fail_num}")
             # if self.fail_num > 0 and not self.forwarding_thread.is_alive():
             #     self.forwarding_thread.start() # 线程已在 init 中启动
+            #     print("启动故障转发线程。")
 
 
     def end(self):
@@ -189,8 +191,10 @@ class DistributedEngine:
                 pass  # 忽略关闭错误
                 
         # 3. 等待转发线程退出
+
         if hasattr(self, 'forwarding_thread') and self.forwarding_thread.is_alive():
             self.forwarding_thread.join(timeout=3)
+            print("故障转发线程已关闭。")
                 
         # 4. 等待接收线程退出
         for t in self.recv_threads:
@@ -320,11 +324,28 @@ class DistributedEngine:
         while len(recv_list) < k:
             # recv_data 是 (task_idx, output)
             taskID, recv_data = self.recv_queue.get(timeout=30) 
+
+            # 安全地提取 task_idx 和 output 信息以便打印（避免直接字符串拼接导致类型错误）
+            task_idx = None
+            output_info = None
+            if isinstance(recv_data, (list, tuple)) and len(recv_data) >= 1:
+                task_idx = recv_data[0]
+            if isinstance(recv_data, (list, tuple)) and len(recv_data) >= 2:
+                out = recv_data[1]
+                try:
+                    output_info = getattr(out, 'shape', str(out))
+                except Exception:
+                    output_info = str(out)
+            if task_idx is not None:
+                print(f"收到任务 {taskID} 的结果 (task_idx={task_idx}, output={output_info})")
+            else:
+                print(f"收到任务 {taskID} 的结果 (output={output_info})")
+            
             recv_cnt += 1
             if taskID == start_or_taskID:
                 recv_list.append(recv_data)
-            # else:
-            #     print(f"收到过期任务 {taskID}，丢弃")
+            else:
+                print(f"收到过期任务 {taskID}，丢弃")
 
         detail_latencies['Recv_Wait_k'] = time.perf_counter() - start_recv_wait # 记录 Recv Wait 时延
 
@@ -365,47 +386,47 @@ class DistributedEngine:
         # return reconstructed_output, consumption
 
 
-    def fail_forwarding(self):
-        while self.is_working:
-            try:
-                for fail_cnt in range(self.fail_num):
-                    taskID, task_idx = self.fail_task_queue.get(timeout=15)
-                    if self.forwarding:
-                        x = self.inputs[task_idx]
-                        target_idx = self.not_fail_list[fail_cnt % len(self.not_fail_list)] # 转发给一个未失败的
-                        send_data(self.chosen_workers[target_idx], (taskID, task_idx, self.cur_layer_id, x))
-                        print(f'Forward task {task_idx} to {target_idx}')
-            except queue.Empty:
-                continue
-            except Exception:
-                if self.is_working:
-                    traceback.print_exc()
-                break
+    # def fail_forwarding(self):
+    #     while self.is_working:
+    #         try:
+    #             for fail_cnt in range(self.fail_num):
+    #                 taskID, task_idx = self.fail_task_queue.get(timeout=15)
+    #                 if self.forwarding:
+    #                     x = self.inputs[task_idx]
+    #                     target_idx = self.not_fail_list[fail_cnt % len(self.not_fail_list)] # 转发给一个未失败的
+    #                     send_data(self.chosen_workers[target_idx], (taskID, task_idx, self.cur_layer_id, x))
+    #                     print(f'Forward task {task_idx} to {target_idx}')
+    #         except queue.Empty:
+    #             continue
+    #         except Exception:
+    #             if self.is_working:
+    #                 traceback.print_exc()
+    #             break
 
-    def bad_fail_forwarding(self):
-        loop_this_thread = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop_this_thread)
-        while self.is_working:
-            try:
-                for fail_cnt in range(self.fail_num):
-                    taskID, task_idx = self.fail_task_queue.get(timeout=15)
-                    if self.forwarding:
-                        x = self.inputs[task_idx]
-                        target_idx = self.not_fail_list[fail_cnt % len(self.not_fail_list)]
-                        print(f'Forward task {task_idx} to {target_idx}')
-                        # 只发送给目标 worker
-                        task_data = (taskID, task_idx, self.cur_layer_id, x)
-                        asyncio.run_coroutine_threadsafe(
-                            async_send_data(self.chosen_workers[target_idx], task_data),
-                            loop_this_thread
-                        ).result(timeout=5)
+    # def bad_fail_forwarding(self):
+    #     loop_this_thread = asyncio.new_event_loop()
+    #     asyncio.set_event_loop(loop_this_thread)
+    #     while self.is_working:
+    #         try:
+    #             for fail_cnt in range(self.fail_num):
+    #                 taskID, task_idx = self.fail_task_queue.get(timeout=15)
+    #                 if self.forwarding:
+    #                     x = self.inputs[task_idx]
+    #                     target_idx = self.not_fail_list[fail_cnt % len(self.not_fail_list)]
+    #                     print(f'Forward task {task_idx} to {target_idx}')
+    #                     # 只发送给目标 worker
+    #                     task_data = (taskID, task_idx, self.cur_layer_id, x)
+    #                     asyncio.run_coroutine_threadsafe(
+    #                         async_send_data(self.chosen_workers[target_idx], task_data),
+    #                         loop_this_thread
+    #                     ).result(timeout=20)
                         
-            except queue.Empty:
-                continue
-            except Exception:
-                if self.is_working:
-                    traceback.print_exc()
-                break
+    #         except queue.Empty:
+    #             continue
+    #         except Exception:
+    #             if self.is_working:
+    #                 traceback.print_exc()
+    #             break
 
 
 def execute_layer(input, layer):
@@ -465,44 +486,6 @@ def dnn_inference_segmented(x: torch.Tensor, model, distributed_engine: Distribu
         current_input = x
         total_latency_run = 0
         
-        # # 1. 遍历所有编码卷积块 (F_Conv)
-        # for i, block_name in enumerate(block_names):
-        #     encoder, final_decoder = master_models[block_name]
-        #     worker_decoder = worker_models[block_name]
-            
-        #     input_H = current_input.shape[2]
-            
-        #     # --- 混合计算逻辑 ---
-        #     if input_H % k_workers != 0:
-        #         # 情况 1: 不可整除，在 Master 端本地执行 F_conv
-        #         print(f"[LOCAL] {block_name}: 高度 {input_H} 无法被 k={k_workers} 整除。本地执行 F_Conv。")
-                
-        #         segment_output, segment_latency = execute_conv_block_locally(
-        #             current_input, 
-        #             worker_decoder
-        #         )
-        #         # 本地执行，所有详细时延都为 0，Total_Segment 为本地时延
-        #         detail_lats = {
-        #             'E_encode': 0.0, 'Send_Tasks': 0.0, 'Recv_Wait_k': 0.0, 
-        #             'D_decode': 0.0, 'Total_Segment': segment_latency
-        #         }
-        #     else:
-        #         # 情况 2: 可整除，执行分布式编码计算
-        #         # 重新启用原始代码逻辑 (确保 execute_coded_segment 逻辑是正确的)
-        #         # segment_output, segment_latency = distributed_engine.execute_coded_segment(
-        #         #     current_input, 
-        #         #     block_name, 
-        #         #     encoder, 
-        #         #     final_decoder
-        #         # )
-        #         segment_output, detail_lats = distributed_engine.execute_coded_segment( # <--- 接收详细时延字典
-        #             current_input, 
-        #             block_name, 
-        #             encoder, 
-        #             final_decoder
-        #         )
-        #         segment_latency = detail_lats['Total_Segment'] # <--- 提取总时延
-            # ---------------------
 
             # 1. 遍历所有编码卷积块 (F_Conv)
         for i, block_name in enumerate(block_names):
@@ -534,7 +517,8 @@ def dnn_inference_segmented(x: torch.Tensor, model, distributed_engine: Distribu
                 pooling_layer = pooling_layers[i]
                 pool_output, pool_latency = execute_layer(current_input, pooling_layer)
                 
-                if r == 0: local_op_latencies.append(pool_latency)
+                if r == 0: 
+                    local_op_latencies.append(pool_latency)
                 total_latency_run += pool_latency
                 current_input = pool_output # 更新输入
 
@@ -547,7 +531,8 @@ def dnn_inference_segmented(x: torch.Tensor, model, distributed_engine: Distribu
             final_output = model.classifier(current_input)
         
         fc_latency = time.perf_counter() - fc_start
-        if r == 0: local_op_latencies.append(fc_latency)
+        if r == 0: 
+            local_op_latencies.append(fc_latency)
         total_latency_run += fc_latency
         
         total_run_latencies.append(total_latency_run)
@@ -635,7 +620,7 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
 
 # --- Main ---
 if __name__ == '__main__':
-    master_ip = '192.168.1.168'
+    master_ip = '192.168.1.13'
     # master_ip = '127.0.0.1'
     worker_socket_timeout = None
     model_name = 'vgg16'
@@ -658,8 +643,8 @@ if __name__ == '__main__':
         # ----------------
         
         n_total = k + r
-        test_repetition = 10
-        fail_num = 1      # 模拟故障数
+        test_repetition = 5
+        fail_num = 2      # 模拟故障数
         assert fail_num <= r, f"故障数(fail_num={fail_num}) 必须小于等于冗余数(r={r})"
 
         print(f"\n--- 分布式推理测试 (n={n_total}, k={k}, r={r}, fail_num={fail_num}) ---\n")

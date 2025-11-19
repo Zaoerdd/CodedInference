@@ -135,7 +135,7 @@ def send_data(send_socket: socket, data, waiting=0):
 #     data = pickle.loads(data)
 #     return data
 
-def send_all(sock: socket.socket, data: bytes, timeout: float = 10) -> None:
+def send_all(sock: socket.socket, data: bytes, timeout: float = 30) -> None:
     """
     可靠的阻塞发送完整数据。
     """
@@ -154,7 +154,7 @@ def send_all(sock: socket.socket, data: bytes, timeout: float = 10) -> None:
     # finally:
     #     sock.settimeout(None)  # 恢复默认超时设置
 
-def recv_exact(sock: socket.socket, size: int, timeout: float = 20) -> bytes:
+def recv_exact(sock: socket.socket, size: int, timeout: float = 30) -> bytes:
     """
     可靠的阻塞接收指定字节数的数据。
     """
