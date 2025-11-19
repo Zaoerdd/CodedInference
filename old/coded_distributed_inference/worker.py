@@ -1,3 +1,7 @@
+# source venvs/pytorch1.1/bin/activate
+# cd Desktop/CodedInference/
+# python worker.py --master 192.168.1.13 --model vgg16
+
 import argparse
 import traceback
 from tqdm import tqdm
@@ -48,15 +52,16 @@ class Worker:
         self.fail = True
         # self.fail_probability = 0.05
 
-        if self.ip is None:
-            print('Fail to acquire ip, try again...')
-            self.ip = get_ip_addr(__subnet__)
-            if self.ip is None:
-                print('Fail to acquire ip, exit')
-                self.initialized = False
-                return
+        # if self.ip is None:
+        #     print('Fail to acquire ip, try again...')
+        #     self.ip = get_ip_addr(__subnet__)
+        #     print(f'Acquired ip: {self.ip}')
+        #     if self.ip is None:
+        #         print('Fail to acquire ip, exit')
+        #         self.initialized = False
+        #         return
 
-        print(f'ip_addr: {self.ip}')
+        # print(f'ip_addr: {self.ip}')
 
     def start_inference(self):
         if not self.initialized:

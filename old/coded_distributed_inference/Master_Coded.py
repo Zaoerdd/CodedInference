@@ -1,3 +1,4 @@
+from socket import AF_INET, create_server
 import sys
 from datetime import datetime
 
@@ -7,7 +8,7 @@ from functions import *
 from tqdm import tqdm
 from util import save_object, load_object
 import numpy.random as random
-from coded_distributed_inference.fountain_code_test.LTCodes import *
+from fountain_code_test.LTCodes import *
 
 
 def create_connections(master_ip: str, timeout=None):
@@ -887,7 +888,7 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
 
 
 if __name__ == '__main__':
-    master_ip = '192.168.1.106'
+    master_ip = '192.168.1.168'
     worker_socket_timeout = None
     model_name = 'vgg16'
     model = load_model(model_name)
@@ -896,8 +897,8 @@ if __name__ == '__main__':
 
     distributed = True
     if distributed:
-        n = 2  # use at most n workers to collaboratively execute one task
-        test_repetition = 4
+        n = 3  # use at most n workers to collaboratively execute one task
+        test_repetition = 1
         fail_num = 0
         random_waiting = True
         lambda_tr = 5
@@ -906,9 +907,9 @@ if __name__ == '__main__':
         master.set_n(n)
         master.set_straggler(1)
         master.set_random_waiting(random_waiting, lambda_tr)
-        # test_methods = ['uncoded']
+        test_methods = ['uncoded']
         # test_methods = ['coded-3', 'coded-2', 'coded-1']
-        test_methods = ['lt']
+        # test_methods = ['lt']
         # test_methods = ['repetition', 'uncoded', 'coded']
         save = False
         distributed_inference_testing(test_repetition, test_methods, master, save)
