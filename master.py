@@ -138,6 +138,13 @@ class DistributedEngine:
         self.cur_layer_id = None # 将用于存储 block_name
         self.inputs = None # 将用于存储 k+r 个分片
 
+        # ---  Random Waiting Initialization ---
+        self.random_waiting = False
+        self.upload_rate = 11 << 20  # 11 MB/s -> B/s (Default setting from Master_Coded)
+        self.random_waiting_coefficient = 0
+        self.waiting_latency = None
+        # ---------------------------------------------
+
         # for async LT codes
         self.asyncio_thread = threading.Thread(target=self.run_loop)
         self.asyncio_thread.start()
@@ -226,6 +233,11 @@ class DistributedEngine:
                  range(self.n)]  # taskID as the identifier of conv task
         
         if self.fail_num == 0:
+            # if self.random_waiting:  # only consider random waiting when n_f=0
+            #     send_tasks = [async_send_data(self.chosen_workers[i], datas[i], self.waiting_latency[i]) for i in
+            #                   range(self.n)]
+            # else:
+            #     send_tasks = [async_send_data(self.chosen_workers[i], datas[i]) for i in range(self.n)]
             send_tasks = [async_send_data(self.chosen_workers[i], datas[i]) for i in
                           range(self.n)]
         else:  # fail_num > 0
@@ -243,6 +255,41 @@ class DistributedEngine:
                 send_tasks.append(async_send_data(self.chosen_workers[i], task_data))
 
         return send_tasks
+    # def gen_send_tasks(self, taskID, task_name: str):
+    #     """
+    #     Generate n=k+r sending tasks, handling failure simulation and random waiting.
+    #     """
+    #     datas = [(taskID, task_idx, task_name, self.inputs[task_idx]) for task_idx in
+    #              range(self.n)]
+        
+    #     send_tasks = []
+        
+    #     # Determine indices that will fail
+    #     fail_task_idx = []
+    #     if self.fail_num > 0:
+    #          fail_task_idx = random.choice(self.n, self.fail_num, replace=False)
+    #          self.not_fail_list = list(set(range(self.n)).difference(fail_task_idx))
+
+    #     for i in range(self.n):
+    #         # 1. Prepare Data Payload
+    #         if self.fail_num > 0 and i in fail_task_idx:
+    #             task_data = (taskID, i, 'fail', self.inputs[i])
+    #         else:
+    #             task_data = datas[i]
+
+    #         # 2. Prepare Latency (Simulated Delay)
+    #         delay = 0
+    #         if self.random_waiting and self.waiting_latency is not None:
+    #             delay = self.waiting_latency[i]
+
+    #         # 3. Create Async Task
+    #         # Assuming async_send_data in comm_util accepts (conn, data, delay)
+    #         if self.random_waiting:
+    #             send_tasks.append(async_send_data(self.chosen_workers[i], task_data, waiting=delay))
+    #         else:
+    #             send_tasks.append(async_send_data(self.chosen_workers[i], task_data))
+
+    #     return send_tasks
 
     def execute_coded_segment(self, x: torch.Tensor, block_name: str, encoder: nn.Module, final_decoder: nn.Module):
         """
@@ -304,6 +351,34 @@ class DistributedEngine:
 
         ## 发送任务
         start_send = time.perf_counter()
+
+        # --- [修改核心] 生成模拟延迟，计算 Overhead，但禁用实际 Sleep ---
+        simulated_delay_overhead = 0.0
+        _temp_latency_backup = None # 用于恢复 latency 数据
+
+        if self.random_waiting:
+            # 1. 生成随机延迟数据 (self.waiting_latency 被填充)
+            self.gen_random_waiting(self.inputs[0].shape, self.n)
+            
+            # 2. 统计模拟数据的特征 (保存到日志)
+            detail_latencies['Simulated_W_Max'] = np.max(self.waiting_latency)
+            detail_latencies['Simulated_W_Mean'] = np.mean(self.waiting_latency)
+            
+            # 3. 计算对总时延的有效贡献 (Bottleneck)
+            # 系统等待最快的 k 个结果，因此受限于排序后第 k 个到达的时间 (索引 k-1)
+            if self.n >= self.k:
+                simulated_delay_overhead = np.sort(self.waiting_latency)[self.k - 1]
+            else:
+                simulated_delay_overhead = np.max(self.waiting_latency)
+
+            # 4. 【关键】临时移除 waiting_latency，使 gen_send_tasks 生成 delay=0 的任务
+            _temp_latency_backup = self.waiting_latency
+            self.waiting_latency = None 
+        else:
+            detail_latencies['Simulated_W_Max'] = 0.0
+            detail_latencies['Simulated_W_Mean'] = 0.0
+        # -----------------------------------------
+
         # 4. 发送 n=k+r 个任务
         start_or_taskID = time.perf_counter()
 
@@ -371,6 +446,11 @@ class DistributedEngine:
         # 总时延
         total_segment_latency = detail_latencies['E_encode'] + detail_latencies['Send_Tasks'] + \
                                 detail_latencies['Recv_Wait_k'] + detail_latencies['D_decode']
+        
+        # --- [关键修改] 直接将模拟的 bottleneck 延迟加到结果中 ---
+        total_segment_latency += simulated_delay_overhead
+        # -----------------------------------------------------
+
         detail_latencies['Total_Segment'] = total_segment_latency
 
         self.forwarding = False # 停止转发此任务
@@ -384,6 +464,21 @@ class DistributedEngine:
         return reconstructed_output, detail_latencies # 返回详细时延字典
 
         # return reconstructed_output, consumption
+
+    def set_random_waiting(self, is_waiting=False, lambda_tr=0):
+        """Enable simulated network latency."""
+        if is_waiting:
+            self.random_waiting = True
+            assert lambda_tr > 0
+            self.random_waiting_coefficient = lambda_tr
+            print(f"Random waiting enabled (lambda_tr={lambda_tr})")
+
+    def gen_random_waiting(self, tensor_shape, n: int):
+        """Generate exponential delay based on data size."""
+        # rate_tr in self.random_waiting_coefficient
+        Ntr = np.prod(tensor_shape) << 2 # 4 bytes per float
+        scale = self.random_waiting_coefficient * (Ntr / self.upload_rate) 
+        self.waiting_latency = random.exponential(scale, n)
 
 
     # def fail_forwarding(self):
@@ -472,11 +567,21 @@ def dnn_inference_segmented(x: torch.Tensor, model, distributed_engine: Distribu
     # 确保按 'block_1', 'block_2' ... 的顺序执行
     block_names = sorted(master_models.keys()) 
     
-    # segment_latencies = {block_name: [] for block_name in block_names}
+    # # segment_latencies = {block_name: [] for block_name in block_names}
+    # detail_segment_latencies = {
+    #     block_name: {'E_encode': [], 'Send_Tasks': [], 'Recv_Wait_k': [], 'D_decode': [], 'Total_Segment': []} 
+    #     for block_name in block_names
+    # }
+
+    # [修改] 初始化字典包含 Simulated_W_Max 和 Simulated_W_Mean
     detail_segment_latencies = {
-        block_name: {'E_encode': [], 'Send_Tasks': [], 'Recv_Wait_k': [], 'D_decode': [], 'Total_Segment': []} 
+        block_name: {
+            'E_encode': [], 'Send_Tasks': [], 'Recv_Wait_k': [], 'D_decode': [], 'Total_Segment': [],
+            'Simulated_W_Max': [], 'Simulated_W_Mean': [] 
+        } 
         for block_name in block_names
     }
+
     local_op_latencies = []
     total_run_latencies = []
     
@@ -559,7 +664,9 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
     total_segment_latency_sum = 0
     
     # 时延键的显示顺序
-    latency_keys = ['E_encode', 'Send_Tasks', 'Recv_Wait_k', 'D_decode', 'Total_Segment']
+    # latency_keys = ['E_encode', 'Send_Tasks', 'Recv_Wait_k', 'D_decode', 'Total_Segment']
+    # [修改] 增加显示 Simulated_W_Max 和 Simulated_W_Mean
+    latency_keys = ['E_encode', 'Simulated_W_Max', 'Simulated_W_Mean', 'Send_Tasks', 'Recv_Wait_k', 'D_decode', 'Total_Segment']
     
     for block_name in sorted(detail_segment_latencies.keys()):
         print(f"  [Segment] **{block_name}**:")
@@ -586,7 +693,14 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
             os.makedirs(save_dir)
             print(f"已创建结果目录: {save_dir}")
 
-        filename_prefix = f'result_n{master.n}_k{master.k}_r{master.r}_f{master.fail_num}_rep{layer_repetition}'
+        # filename_prefix = f'result_n{master.n}_k{master.k}_r{master.r}_f{master.fail_num}_rep{layer_repetition}'
+        # 构建文件名：加入延迟信息
+        latency_info = ""
+        if master.random_waiting:
+            # 如果开启随机延迟，文件名添加 _tr{系数}，例如 _tr5
+            latency_info = f"_tr{master.random_waiting_coefficient}"
+        
+        filename_prefix = f'result_n{master.n}_k{master.k}_r{master.r}_f{master.fail_num}_rep{layer_repetition}{latency_info}'
         
         # 1. 准备详细分段时延数据 (detail_segment_latencies)
         json_segment_data = {}
@@ -618,6 +732,10 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
     print("测试完成，Master 已关闭。")
 
 
+
+
+
+
 # --- Main ---
 if __name__ == '__main__':
     master_ip = '192.168.1.13'
@@ -644,14 +762,24 @@ if __name__ == '__main__':
         
         n_total = k + r
         test_repetition = 5
-        fail_num = 2      # 模拟故障数
+        fail_num = 0      # 模拟故障数
+
+        #  Random Waiting Configuration ---
+        random_waiting = True  # Set to True to enable
+        lambda_tr = 5          # Adjust coefficient
+        # --------------------------------------------
+
         assert fail_num <= r, f"故障数(fail_num={fail_num}) 必须小于等于冗余数(r={r})"
 
-        print(f"\n--- 分布式推理测试 (n={n_total}, k={k}, r={r}, fail_num={fail_num}) ---\n")
+        print(f"\n--- 分布式推理测试 (n={n_total}, k={k}, r={r}, fail_num={fail_num}), random_waiting={random_waiting}, lambda_tr={lambda_tr} ---\n")
 
         master = DistributedEngine(master_ip, worker_socket_timeout, model, 
                                    k_workers=k, r_workers=r)
         master.set_failure(fail_num)
+
+        # --- [ADDED] Apply Settings ---
+        master.set_random_waiting(random_waiting, lambda_tr)
+        # ------------------------------
 
         test_methods = ['segment_coded'] # 仅用于日志记录
         save = True
