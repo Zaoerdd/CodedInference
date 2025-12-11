@@ -1,3 +1,5 @@
+# 混合
+
 # master.py
 # python worker.py --master 127.0.0.1 --model vgg16
 # python worker.py --master 192.168.1.13 --model vgg16
@@ -150,7 +152,6 @@ class DistributedEngine:
         self.asyncio_thread.start()
 
         # 启动所有线程
-        # self.forwarding_thread.start()
         for t in self.recv_threads:
             t.start()
         
@@ -231,6 +232,11 @@ class DistributedEngine:
                  range(self.n)]  # taskID as the identifier of conv task
         
         if self.fail_num == 0:
+            # if self.random_waiting:  # only consider random waiting when n_f=0
+            #     send_tasks = [async_send_data(self.chosen_workers[i], datas[i], self.waiting_latency[i]) for i in
+            #                   range(self.n)]
+            # else:
+            #     send_tasks = [async_send_data(self.chosen_workers[i], datas[i]) for i in range(self.n)]
             send_tasks = [async_send_data(self.chosen_workers[i], datas[i]) for i in
                           range(self.n)]
         else:  # fail_num > 0
@@ -263,7 +269,7 @@ class DistributedEngine:
         ## 分块和编码
         start_E = time.perf_counter()
 
-        # --- [START] 修改点 1: 零填充逻辑 ---
+        # --- 零填充逻辑 ---
         original_H = x.shape[2]
         pad_H = 0
         if original_H % k != 0:
@@ -308,7 +314,7 @@ class DistributedEngine:
         ## 发送任务
         start_send = time.perf_counter()
 
-        # --- 生成模拟延迟，计算 Overhead，但禁用实际 Sleep ---
+        # --- 生成模拟延迟，计算 Overhead ---
         simulated_delay_overhead = 0.0
         _temp_latency_backup = None # 用于恢复 latency 数据
 
@@ -464,6 +470,7 @@ def execute_conv_block_locally(input, worker_decoder: nn.Module):
     return output, consumption
 
 
+
 def dnn_inference_segmented(x: torch.Tensor, model, distributed_engine: DistributedEngine, conv_repeat=1):
     """
     新的推理循环，按分段模型执行，支持分布式/本地混合计算。
@@ -478,7 +485,9 @@ def dnn_inference_segmented(x: torch.Tensor, model, distributed_engine: Distribu
     
     # 确保按 'block_1', 'block_2' ... 的顺序执行
     block_names = sorted(master_models.keys()) 
-
+    
+   
+    # 初始化字典包含 Simulated_W_Max 和 Simulated_W_Mean
     detail_segment_latencies = {
         block_name: {
             'E_encode': [], 'Send_Tasks': [], 'Recv_Wait_k': [], 'D_decode': [], 'Total_Segment': [],
@@ -496,28 +505,56 @@ def dnn_inference_segmented(x: torch.Tensor, model, distributed_engine: Distribu
         current_input = x
         total_latency_run = 0
         
-
-            # 1. 遍历所有编码卷积块 (F_Conv)
+        # 1. 遍历所有编码卷积块 (F_Conv)
         for i, block_name in enumerate(block_names):
-            encoder, final_decoder = master_models[block_name]
             
+            # --- 判断是否为最后一个块 ---
+            is_last_block = (i == len(block_names) - 1)
 
-            # 直接执行分布式编码计算，填充逻辑已移入 execute_coded_segment
-            segment_output, detail_lats = distributed_engine.execute_coded_segment( 
-                current_input, 
-                block_name, 
-                encoder, 
-                final_decoder
-            )
-            segment_latency = detail_lats['Total_Segment'] # <--- 提取总时延
+            if is_last_block:
+                # === 本地执行模式 (针对最后一个块) ===
+                # 直接使用 worker_models 中的卷积层在本地计算
+                start_local_conv = time.perf_counter()
+                
+                local_conv_layer = worker_models[block_name]
+                current_input = local_conv_layer(current_input)
+                
+                local_conv_latency = time.perf_counter() - start_local_conv
+                total_latency_run += local_conv_latency
+                
+                # 为了保持数据结构一致，填充 0 到分布式特定的时延字段
+                # 将本地执行时间记录在 Total_Segment 中
+                zero_lat = 0.0
+                detail_segment_latencies[block_name]['E_encode'].append(zero_lat)
+                detail_segment_latencies[block_name]['Send_Tasks'].append(zero_lat)
+                detail_segment_latencies[block_name]['Recv_Wait_k'].append(zero_lat)
+                detail_segment_latencies[block_name]['D_decode'].append(zero_lat)
+                detail_segment_latencies[block_name]['Simulated_W_Max'].append(zero_lat)
+                detail_segment_latencies[block_name]['Simulated_W_Mean'].append(zero_lat)
+                detail_segment_latencies[block_name]['Total_Segment'].append(local_conv_latency)
+                
+                if r == 0:
+                    print(f"--> [Local Execution] Block '{block_name}' executed locally on Master. ({local_conv_latency:.4f}s)")
             
-            # segment_latencies[block_name].append(segment_latency)
-            # 记录详细时延
-            for key, val in detail_lats.items():
-                detail_segment_latencies[block_name][key].append(val)
+            else:
+                # === 分布式执行模式 (针对前面的块) ===
+                encoder, final_decoder = master_models[block_name]
 
-            total_latency_run += segment_latency
-            current_input = segment_output # 更新当前输入为解码或本地执行后的输出
+                # 直接执行分布式编码计算
+                segment_output, detail_lats = distributed_engine.execute_coded_segment( 
+                    current_input, 
+                    block_name, 
+                    encoder, 
+                    final_decoder
+                )
+                segment_latency = detail_lats['Total_Segment'] # <--- 提取总时延
+                
+                # 记录详细时延
+                for key, val in detail_lats.items():
+                    detail_segment_latencies[block_name][key].append(val)
+
+                total_latency_run += segment_latency
+                current_input = segment_output # 更新当前输入为解码后的输出
             
             # 2. 在 Master 本地执行池化层 (Pooling)
             if i < len(pooling_layers):
@@ -611,27 +648,25 @@ def distributed_inference_testing(layer_repetition, methods: list, master: Distr
             }
         
         # 保存详细分段时延
-        json_filename_details = os.path.join(save_dir, f'{filename_prefix}_segment_details.json')
+        json_filename_details = os.path.join(save_dir, f'm_{filename_prefix}_segment_details.json')
         with open(json_filename_details, 'w') as f:
             json.dump(json_segment_data, f, indent=4)
         print(f"详细分段时延已保存到 {json_filename_details}")
         
         # 2. 保存本地操作时延 (local_latencies)
-        json_filename_local = os.path.join(save_dir, f'{filename_prefix}_local_ops.json')
+        json_filename_local = os.path.join(save_dir, f'm_{filename_prefix}_local_ops.json')
         with open(json_filename_local, 'w') as f:
             json.dump(np.array(local_latencies).tolist(), f, indent=4)
         print(f"本地操作时延已保存到 {json_filename_local}")
 
         # 3. 保存总运行时间 (total_run_latencies)
-        json_filename_total = os.path.join(save_dir, f'{filename_prefix}_total_run.json')
+        json_filename_total = os.path.join(save_dir, f'm_{filename_prefix}_total_run.json')
         with open(json_filename_total, 'w') as f:
             json.dump(np.array(total_run_latencies).tolist(), f, indent=4)
         print(f"总运行时间已保存到 {json_filename_total}")
 
     master.end()
     print("测试完成，Master 已关闭。")
-
-
 
 
 
@@ -665,8 +700,8 @@ if __name__ == '__main__':
         fail_num = 0      # 模拟故障数
 
         #  Random Waiting Configuration ---
-        random_waiting = False  # Set to True to enable
-        lambda_tr = 2          # Adjust coefficient
+        random_waiting = True  # Set to True to enable
+        lambda_tr = 10          # Adjust coefficient
         # --------------------------------------------
 
         assert fail_num <= r, f"故障数(fail_num={fail_num}) 必须小于等于冗余数(r={r})"
@@ -677,7 +712,7 @@ if __name__ == '__main__':
                                    k_workers=k, r_workers=r)
         master.set_failure(fail_num)
 
-        # --- [ADDED] Apply Settings ---
+        # ---  Apply Settings ---
         master.set_random_waiting(random_waiting, lambda_tr)
         # ------------------------------
 

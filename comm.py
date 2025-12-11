@@ -28,20 +28,6 @@ data_header_format = 'I'
 data_header_size = struct.calcsize(data_header_format)
 
 
-# def accept_connection(server_socket: socket, recv_list: List, stop, timeout=None):
-#     while True:
-#         if stop():
-#             break
-#         try:
-#             conn, addr = server_socket.accept()
-#             conn.settimeout(timeout)
-#             recv_list.append((conn, addr[0]))  # only ip
-#             print(f'Recv connection from {addr}')
-#         except socket.timeout:
-#             continue
-#         except Exception as e:
-#             print(e)
-
 def accept_connection(server_socket: socket, recv_list: List, stop, timeout=None):
     while True:
         if stop():
@@ -81,20 +67,6 @@ def connect_to_other(ip_list: List, port: int, socket_list: list, self_ip):
         print(e)
 
 
-# def connect_to_other_local(port_list: list, socket_list: list, self_ip):
-#     try:
-#         for i, port in enumerate(port_list):
-#             if worker_ip != self_ip:
-#                 addr = worker_ip, port
-#                 conn = create_connection(addr, timeout=5)
-#                 print(f'Connected to {worker_ip}')
-#                 socket_list.append((conn, addr[0]))
-#     except timeout:
-#         print('Create connections timeout')
-#     except Exception as e:
-#         print(e)
-
-
 def send_data(send_socket: socket, data, waiting=0):
     if not isinstance(data, (bytes, bytearray)):
         data = pickle.dumps(data)
@@ -104,36 +76,6 @@ def send_data(send_socket: socket, data, waiting=0):
         time.sleep(waiting)
     res = send_socket.sendall(header + data)
     return res
-
-
-# async def async_send_data(send_socket: socket, data, loop=None, waiting=0):
-#     if loop is None:
-#         loop = asyncio.get_running_loop()
-#     if not isinstance(data, (bytes, bytearray)):
-#         data = pickle.dumps(data)
-#     data_size = len(data)
-#     header = struct.pack(data_header_format, data_size)
-#     if waiting:
-#         await asyncio.sleep(waiting)  # 1.sleep before sending
-#     res = await loop.sock_sendall(send_socket, header + data)
-#     return res
-
-
-# def recv_data(recv_socket: socket):
-#     msg = recv_socket.recv(data_header_size, socket.MSG_WAITALL)
-#     header = struct.unpack(data_header_format, msg)
-#     data_size = header[0]
-#     data = bytearray(data_size)
-#     ptr = memoryview(data)
-#     while data_size:
-#         nrecv = recv_socket.recv_into(buffer=ptr, nbytes=min(4096, data_size))
-#         ptr = ptr[nrecv:]
-#         data_size -= nrecv
-#         # recv = recv_socket.recv(min(4096, data_size), MSG_WAITALL)  # deprecated
-#         # data += recv
-#         # data_size -= len(recv)
-#     data = pickle.loads(data)
-#     return data
 
 def send_all(sock: socket.socket, data: bytes, timeout: float = 30) -> None:
     """
@@ -176,24 +118,6 @@ def recv_exact(sock: socket.socket, size: int, timeout: float = 30) -> bytes:
     
     return bytes(data)
 
-# async def async_send_data(send_socket: socket, data, loop=None, waiting=0):
-#     """
-#     使用 run_in_executor 在 event loop 中执行阻塞的 sendall，
-#     避免要求 socket 非阻塞，从而兼容接收线程使用阻塞 recv。
-#     """
-#     if loop is None:
-#         loop = asyncio.get_running_loop()
-#     if not isinstance(data, (bytes, bytearray)):
-#         data = pickle.dumps(data)
-#     data_size = len(data)
-#     header = struct.pack(data_header_format, data_size)
-#     payload = header + data
-#     if waiting:
-#         await asyncio.sleep(waiting)
-#     # 在线程池中执行阻塞 sendall
-#     await loop.run_in_executor(None, send_socket.sendall, payload)
-#     return None
-
 async def async_send_data(send_socket: socket.socket, data, loop=None, waiting: float = 0):
     """
     异步发送数据。使用线程池执行阻塞的发送操作。
@@ -229,24 +153,6 @@ async def async_send_data(send_socket: socket.socket, data, loop=None, waiting: 
         print(f"发送数据时发生未知错误: {e}")
         raise
 
-# def recv_exact(recv_socket: socket.socket, nbytes: int) -> bytes:
-#     """在阻塞模式下按字节数精确接收（跨平台、兼容 Windows）。"""
-#     data = b''
-#     while len(data) < nbytes:
-#         chunk = recv_socket.recv(nbytes - len(data))
-#         if not chunk:
-#             raise ConnectionError("Connection closed while receiving data")
-#         data += chunk
-#     return data
-
-# def recv_data(recv_socket: socket):
-#     # 读取固定大小 header
-#     msg = recv_exact(recv_socket, data_header_size)
-#     header = struct.unpack(data_header_format, msg)
-#     data_size = header[0]
-#     # 读取数据体
-#     raw = recv_exact(recv_socket, data_size)
-#     return pickle.loads(raw)
 
 def recv_data(recv_socket: socket.socket) -> any:
     """
@@ -285,13 +191,9 @@ async def async_recv_data1(recv_socket: socket.socket, loop=None):
     sofar = 0
     print(f'Start Recv {data_size} bytes')
     while sofar < data_size:
-        # nrecv = recv_socket.recv_into(buffer=ptr, nbytes=min(4096, data_size), flags=socket.MSG_WAITALL)
         ptr = ptr[sofar:]
         nrecv = await loop.sock_recv_into(recv_socket, ptr)
         sofar += nrecv
-        # recv = recv_socket.recv(min(4096, data_size))
-        # data += recv
-        # data_size -= len(recv)
     print(f'Finish Recv {data_size} bytes')
     return pickle.loads(data)
 
